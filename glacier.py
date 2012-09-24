@@ -26,7 +26,6 @@ import sys
 import binascii
 import socket
 import hmac
-import configparser
 import os
 import io
 import json
@@ -38,7 +37,9 @@ from time import sleep
 if sys.version < '3':
     from httplib import HTTPConnection
     from urlparse import urlparse, parse_qs
+    import ConfigParser as configparser
 else:
+    import configparser
     from http.client import HTTPConnection
     from urllib.parse import urlparse, parse_qs
 
@@ -351,7 +352,7 @@ class FileOps:
 
 class Archive:
     def upload(config, vault, filename, description=None):
-    	""" Single Request upload """
+        """ Single Request upload """
         req = Request(config, 'POST', '/-/vaults/' + vault + '/archives')
         if description != None:
             req.headers['x-amz-archive-description'] = description
