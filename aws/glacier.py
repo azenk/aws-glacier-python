@@ -46,8 +46,8 @@ else:
 
 class Profile:
 
-    def __init__(self, access_id='',key='',region="us-east-1",debug=0,log='~/.awslog',chunksize=4*2**20,maxtries=20,host="glacier.us-east-1.amazonaws.com",port=80):
-        self.accessid_id = access_id
+    def __init__(self, access_id='',key='',region="us-east-1",debug=False,log='~/.awslog',chunksize=4*2**20,maxtries=20,host="glacier.us-east-1.amazonaws.com",port=80):
+        self.accessid = access_id
         self.key = key
         self.region = region
         self.debug = debug
@@ -148,7 +148,7 @@ class Request():
         self.region = profile.getRegion()
         self.debug = profile.getDebug()
         self.profile = profile
-        self.hideResponseHeaders = False
+        self.hideResponseHeaders = not profile.getDebug() 
         self.method = method
         self.url = url
         self.headers = {}
@@ -306,16 +306,24 @@ class Request():
         return s
             
 class Vault:
-    def __init__(self,profile,vaultname):
+    def __init__(self,profile,vaultname,properties=None):
         self.vaultname = vaultname
         self.profile = profile
+        if properties == None:
+            res,reply = Vault.vaultoperation(self.profile, 'GET', self.vaultname)
+            self.properties = json.loads(reply.decode('utf-8'))
+        else:
+            self.properties = properties
+
+
+
 
     @staticmethod
     def vaultoperation(profile, op, name):
-        req = Request(self.profile, op, '/-/vaults/' + name)
+        req = Request(profile, op, '/-/vaults/' + name)
         req.addContentLength()
         req.sign()
-        req.send()
+        return req.send()
 
     @staticmethod
     def create(profile,name):
@@ -327,13 +335,24 @@ class Vault:
         req = Request(profile, 'GET', '/-/vaults')
         req.addContentLength()
         req.sign()
-        req.send()
+        res,reply = req.send()
+        vaultinfo = json.loads(reply.decode('utf-8'))
+        vaults = []
+        if 'VaultList' in vaultinfo:
+            for vault in vaultinfo['VaultList']:
+                if 'VaultName' in vault:
+                    vaults.append(Vault(profile,vault['VaultName'],vault))
+        return vaults
+
+    def getProperties(self):
+    	return self.properties
 
     def delete(self):
         Vault.vaultoperation(self.profile, 'DELETE', name)
 
-    def describe(self):
-        Vault.vaultoperation(self.profile, 'GET', name)
+    def __str__(self):
+        return self.vaultname
+
 
 class FileOps:
 
