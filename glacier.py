@@ -318,261 +318,271 @@ class Request():
 
         return s
             
-
-def vaultoperation(config, op, name):
-    req = Request(config, op, '/-/vaults/' + name)
-    req.addContentLength()
-    req.sign()
-    req.send(config)
-
-def makevault(config, name):
-    vaultoperation(config, 'PUT', name)
-
-def deletevault(config, name):
-    vaultoperation(config, 'DELETE', name)
-
-def describevault(config, name):
-    vaultoperation(config, 'GET', name)
-
-def listvaults(config):
-    req = Request(config, 'GET', '/-/vaults')
-    req.addContentLength()
-    req.sign()
-    req.send(config)
-
-def uploadFile(config, vault, filename, description=None):
-    req = Request(config, 'POST', '/-/vaults/' + vault + '/archives')
-    if description != None:
-        req.headers['x-amz-archive-description'] = description
-
-    req.setPayloadFile(filename)
-    req.addContentLength()
-    req.sign()
-    req.send(config)
-
-def getFilePart(filename, offset, partsize):
-    with open(filename, 'rb') as fb:
-        fb.seek(offset)
-        return fb.read(partsize)
-
-def listParts(config, vault, uploadid, marker=None):
-    query = '/-/vaults/' + vault + '/multipart-uploads/' + uploadid
-    if marker != None:
-        query += '?marker=' + marker
-    req = Request(config, 'GET', query)
-    req.hideResponseHeaders = True
-    req.addContentLength()
-    req.sign()
-    return req.send(config)
-
-def findUploadedFileOffset(config, vault, uploadid):
-    parts = []
-    marker = None
-    while True:
-        res, reply = listParts(config, vault, uploadid, marker)
-        partreply = json.loads(reply.decode('utf-8'))
-        if 'Parts' not in partreply:
-            raise KeyError('Parts not in ' + str(partreply))
-        parts += partreply['Parts']
-        marker = partreply['Marker']
-        if marker == None:
-            break
-
-    # TODO? verify the treehashes?
-    maxoffset = 0
-    for item in parts:
-        maxval = int(item['RangeInBytes'].split('-')[1])
-        maxoffset = max(maxoffset, maxval)
-    return maxoffset, parts
-
-def treehashFromList(thl, start, end):
-    start = start//1024//1024
-    end = end//1024//1024
-    hashparts = thl[start:end]
-    return treehash(hashparts)
-
-def checkHashes(config, vault, filename, uploadid):
-    offset, parts = findUploadedFileOffset(config, vault, uploadid)
-    badhashes = []
-    print("Hashing file: " + str(filename))
-    fullhash, treehash, thl = hashfile(filename)
-    for part in parts:
-        rng = [int(x) for x in part['RangeInBytes'].split('-')]
-        mytreehash = binascii.hexlify(treehashFromList(thl, rng[0], rng[1])).decode('ascii')
-        # ??? aws puts '01' at the beginning of their hash?
-        if mytreehash not in part['SHA256TreeHash']:
-            badhashes += [part]
-            print("Hash mismatch: " + str(part) + "\nExpected: " + str(mytreehash)
-                  + "\nAt offset: " + str(rng[0]/1024/1024) + " MB to "
-                  + str(rng[1]/1024/1024) + ' MB')
-    print('Checked ' + str(len(parts)) + ' hashes')
-    print('Full file hash: ' + binascii.hexlify(fullhash).decode('ascii'))
-    print('Full file treehash: ' + binascii.hexlify(treehash).decode('ascii'))
-    return badhashes
-        
-def repairMultipartFile(config, vault, filename, uploadid, partsize=None):
-    if partsize == None:
-        partsize = int(config['chunksize'])*ONE_MB
-    parts = checkHashes(config, vault, filename, uploadid)
-    for part in parts:
-        rng = [int(x) for x in part['RangeInBytes'].split('-')]
-
-
-        offset = rng[0]
-        part = getFilePart(filename, offset, partsize)
-
-        # len(part) will work for chunks and the last chunk in the file rather than partsize
-        if (rng[1] - rng[0] != len(part)):
-            raise ValueError('Part size expected: ' + str(partsize) + ' found: ' + str(rng[1] - rng[0]))
-
-
-        req = Request(config, 'PUT', '/-/vaults/' + vault + '/multipart-uploads/' + uploadid)
-        part = getFilePart(filename, offset, partsize)
-        req.headers['Content-Range'] = 'bytes ' + str(offset) + '-' + str(offset+len(part)-1) + '/*'
-        req.setPayloadContents(part)
-
+class Vault:
+    def vaultoperation(config, op, name):
+        req = Request(config, op, '/-/vaults/' + name)
         req.addContentLength()
         req.sign()
-        #req.hideResponseHeaders = True
-        res, reply = req.send(config)
-        if res.status != 204:
-            raise ValueError('Expected 204 response from multipart PUT request @ offset '
-                             + str(offset) + '\n' 
-                             + str(res.reason) + '\n' 
-                             + str(res.getheaders()) + '\n'
-                             + str(reply))
+        req.send(config)
 
-        print('Repaired part at offset ' + str(offset) + ' (' + str(offset//1024//1024) + ' MB)')
+    def makevault(config, name):
+        vaultoperation(config, 'PUT', name)
+
+    def deletevault(config, name):
+        vaultoperation(config, 'DELETE', name)
+
+    def describevault(config, name):
+        vaultoperation(config, 'GET', name)
+
+    def listvaults(config):
+        req = Request(config, 'GET', '/-/vaults')
+        req.addContentLength()
+        req.sign()
+        req.send(config)
+
+class FileOps:
+
+    @staticmethod
+    def getPart(filename, offset, partsize):
+        with open(filename, 'rb') as fb:
+            fb.seek(offset)
+            return fb.read(partsize)
 
 
-
-def multipartUploadFile(config, vault, filename, description=None, uploadid=None, partsize=None,maxtries=None):
-    if partsize == None:
-        partsize = int(config['chunksize'])*ONE_MB
-    if maxtries == None:
-        maxtries = int(config['maxtries'])
-
-    offset = 0
-    size = os.stat(filename).st_size
-
-    # uploadid is set to the multipart upload id or None if starting for the first time
-    if uploadid == None:
-        req = Request(config, 'POST', '/-/vaults/' + vault + '/multipart-uploads')
+class Archive:
+    def upload(config, vault, filename, description=None):
+    	""" Single Request upload """
+        req = Request(config, 'POST', '/-/vaults/' + vault + '/archives')
         if description != None:
             req.headers['x-amz-archive-description'] = description
-        req.headers['x-amz-part-size'] = str(partsize)
 
+        req.setPayloadFile(filename)
         req.addContentLength()
         req.sign()
+        req.send(config)
+
+    def listParts(config, vault, uploadid, marker=None):
+        query = '/-/vaults/' + vault + '/multipart-uploads/' + uploadid
+        if marker != None:
+            query += '?marker=' + marker
+        req = Request(config, 'GET', query)
         req.hideResponseHeaders = True
-        res, reply = req.send(config)
-        uploadid = res.getheader('x-amz-multipart-upload-id')
-        if not uploadid:
-            raise KeyError('x-amz-multipart-upload-id not in response headers')
-        print('Starting upload of ' + filename)
-        print('Upload ID: ' + str(uploadid))
-    else:
-        uploadid = uploadid
+        req.addContentLength()
+        req.sign()
+        return req.send(config)
+
+    def findUploadedOffset(config, vault, uploadid):
+        parts = []
+        marker = None
+        while True:
+            res, reply = listParts(config, vault, uploadid, marker)
+            partreply = json.loads(reply.decode('utf-8'))
+            if 'Parts' not in partreply:
+                raise KeyError('Parts not in ' + str(partreply))
+            parts += partreply['Parts']
+            marker = partreply['Marker']
+            if marker == None:
+                break
+
+        # TODO? verify the treehashes?
+        maxoffset = 0
+        for item in parts:
+            maxval = int(item['RangeInBytes'].split('-')[1])
+            maxoffset = max(maxoffset, maxval)
+        return maxoffset, parts
+
+    def treehashFromList(thl, start, end):
+        start = start//1024//1024
+        end = end//1024//1024
+        hashparts = thl[start:end]
+        return treehash(hashparts)
+
+    def checkHashes(config, vault, filename, uploadid):
         offset, parts = findUploadedFileOffset(config, vault, uploadid)
-        print('Resuming upload at offset: ' + str(offset) + ' (' + str(offset//1024//1024) + ' MB)')
+        badhashes = []
+        print("Hashing file: " + str(filename))
+        fullhash, treehash, thl = hashfile(filename)
+        for part in parts:
+            rng = [int(x) for x in part['RangeInBytes'].split('-')]
+            mytreehash = binascii.hexlify(treehashFromList(thl, rng[0], rng[1])).decode('ascii')
+            # ??? aws puts '01' at the beginning of their hash?
+            if mytreehash not in part['SHA256TreeHash']:
+                badhashes += [part]
+                print("Hash mismatch: " + str(part) + "\nExpected: " + str(mytreehash)
+                      + "\nAt offset: " + str(rng[0]/1024/1024) + " MB to "
+                      + str(rng[1]/1024/1024) + ' MB')
+        print('Checked ' + str(len(parts)) + ' hashes')
+        print('Full file hash: ' + binascii.hexlify(fullhash).decode('ascii'))
+        print('Full file treehash: ' + binascii.hexlify(treehash).decode('ascii'))
+        return badhashes
+        
+    def repairMultipart(config, vault, filename, uploadid, partsize=None):
+        if partsize == None:
+            partsize = int(config['chunksize'])*ONE_MB
+        parts = checkHashes(config, vault, filename, uploadid)
+        for part in parts:
+            rng = [int(x) for x in part['RangeInBytes'].split('-')]
+    
+    
+            offset = rng[0]
+            part = getFilePart(filename, offset, partsize)
+
+            # len(part) will work for chunks and the last chunk in the file rather than partsize
+            if (rng[1] - rng[0] != len(part)):
+                raise ValueError('Part size expected: ' + str(partsize) + ' found: ' + str(rng[1] - rng[0]))
 
 
-    while offset < size:
-        req = Request(config, 'PUT', '/-/vaults/' + vault + '/multipart-uploads/' + uploadid)
-        part = getFilePart(filename, offset, partsize)
-        req.headers['Content-Range'] = 'bytes ' + str(offset) + '-' + str(offset+len(part)-1) + '/*'
-        req.setPayloadContents(part)
+            req = Request(config, 'PUT', '/-/vaults/' + vault + '/multipart-uploads/' + uploadid)
+            part = getFilePart(filename, offset, partsize)
+            req.headers['Content-Range'] = 'bytes ' + str(offset) + '-' + str(offset+len(part)-1) + '/*'
+            req.setPayloadContents(part)
 
-        req.addContentLength()
-        req.sign()
-        req.hideResponseHeaders = True
-        try:
+            req.addContentLength()
+            req.sign()
+            #req.hideResponseHeaders = True
             res, reply = req.send(config)
             if res.status != 204:
-                print('Expected 204 response from multipart PUT request @ offset '
-                      + str(offset) + '\n' 
-                      + str(res.reason) + '\n'
-                      + str(res.getheaders()) + '\n'
-                      + str(reply))
-                maxtries -= 1
+                raise ValueError('Expected 204 response from multipart PUT request @ offset '
+                                 + str(offset) + '\n' 
+                                 + str(res.reason) + '\n' 
+                                 + str(res.getheaders()) + '\n'
+                                 + str(reply))
+    
+            print('Repaired part at offset ' + str(offset) + ' (' + str(offset//1024//1024) + ' MB)')
+
+
+
+    def multipartUpload(config, vault, filename, description=None, uploadid=None, partsize=None,maxtries=None):
+        if partsize == None:
+            partsize = int(config['chunksize'])*ONE_MB
+        if maxtries == None:
+            maxtries = int(config['maxtries'])
+    
+        offset = 0
+        size = os.stat(filename).st_size
+    
+        # uploadid is set to the multipart upload id or None if starting for the first time
+        if uploadid == None:
+            req = Request(config, 'POST', '/-/vaults/' + vault + '/multipart-uploads')
+            if description != None:
+                req.headers['x-amz-archive-description'] = description
+            req.headers['x-amz-part-size'] = str(partsize)
+    
+            req.addContentLength()
+            req.sign()
+            req.hideResponseHeaders = True
+            res, reply = req.send(config)
+            uploadid = res.getheader('x-amz-multipart-upload-id')
+            if not uploadid:
+                raise KeyError('x-amz-multipart-upload-id not in response headers')
+            print('Starting upload of ' + filename)
+            print('Upload ID: ' + str(uploadid))
+        else:
+            uploadid = uploadid
+            offset, parts = findUploadedFileOffset(config, vault, uploadid)
+            print('Resuming upload at offset: ' + str(offset) + ' (' + str(offset//1024//1024) + ' MB)')
+    
+
+        while offset < size:
+            req = Request(config, 'PUT', '/-/vaults/' + vault + '/multipart-uploads/' + uploadid)
+            part = getFilePart(filename, offset, partsize)
+            req.headers['Content-Range'] = 'bytes ' + str(offset) + '-' + str(offset+len(part)-1) + '/*'
+            req.setPayloadContents(part)
+
+            req.addContentLength()
+            req.sign()
+            req.hideResponseHeaders = True
+            try:
+                res, reply = req.send(config)
+                if res.status != 204:
+                    print('Expected 204 response from multipart PUT request @ offset '
+                          + str(offset) + '\n' 
+                          + str(res.reason) + '\n'
+                          + str(res.getheaders()) + '\n'
+                          + str(reply))
+                    maxtries -= 1
+                    if maxtries < 1:
+                        print('Try limit exceeded...exiting')
+                        return
+                    continue
+    
+    
+                print('Uploaded ' + str(len(part)/1024/1024) + ' MB @ offset ' + str(offset) + ' bytes (' + str(offset//1024//1024) + ' MB)')
+                offset += len(part)
+            except socket.error as e:
+                print('Socket error: ' + str(e))
                 if maxtries < 1:
                     print('Try limit exceeded...exiting')
                     return
-                continue
+                print('Retrying...')
+                sleep(1)
+                maxtries -= 1
+    
+        print('Calculating hash and finishing upload of ' + filename)
+        # calculate hash before creating the request otherwise it might be out of date by the time
+        # we send the request
+        linearhash, treehash, thl = hashfile(filename)
+    
+        req = Request(config, 'POST', '/-/vaults/' + vault + '/multipart-uploads/'+uploadid)
+        req.headers['x-amz-archive-size'] = str(size)
+        req.headers['x-amz-sha256-tree-hash'] = binascii.hexlify(treehash).decode('ascii')
+        req.addContentLength()
+        req.sign()
+        res, reply = req.send(config)
+    
+        print('Uploaded ' + filename)
+        if res.status != 201:
+            raise ValueError('Expected 201 Created response from upload finish request')
+        if 'log' in config and len(config['log']) > 0:
+            path = os.path.expanduser(config['log'])
+            location = res.getheader('Location', uploadid)
+            with open(path, 'a') as fd:
+                fd.write(str(filename) + '->' + location + '\n')
+                print('Wrote upload log entry to ' + path)
+    
+    
+    def listUploads(config, vault):
+        req = Request(config, 'GET', '/-/vaults/' + vault + '/multipart-uploads')
+        req.addContentLength()
+        req.sign()
+        req.send(config)
+    
+    def abortUpload(config, vault, uploadid):
+        req = Request(config, 'DELETE', '/-/vaults/' + vault + '/multipart-uploads/' + uploadid)
+        req.addContentLength()
+        req.sign()
+        req.send(config)
+    
+    def deleteFile(config, vault, archiveid):
+        req = Request(config, 'DELETE', '/-/vaults/' + vault + '/archives/' + archiveid)
+        req.addContentLength()
+        req.sign()
+        req.send(config)
+    
+class Job:
 
-
-            print('Uploaded ' + str(len(part)/1024/1024) + ' MB @ offset ' + str(offset) + ' bytes (' + str(offset//1024//1024) + ' MB)')
-            offset += len(part)
-        except socket.error as e:
-            print('Socket error: ' + str(e))
-            if maxtries < 1:
-                print('Try limit exceeded...exiting')
-                return
-            print('Retrying...')
-            sleep(1)
-            maxtries -= 1
-
-    print('Calculating hash and finishing upload of ' + filename)
-    # calculate hash before creating the request otherwise it might be out of date by the time
-    # we send the request
-    linearhash, treehash, thl = hashfile(filename)
-
-    req = Request(config, 'POST', '/-/vaults/' + vault + '/multipart-uploads/'+uploadid)
-    req.headers['x-amz-archive-size'] = str(size)
-    req.headers['x-amz-sha256-tree-hash'] = binascii.hexlify(treehash).decode('ascii')
-    req.addContentLength()
-    req.sign()
-    res, reply = req.send(config)
-
-    print('Uploaded ' + filename)
-    if res.status != 201:
-        raise ValueError('Expected 201 Created response from upload finish request')
-    if 'log' in config and len(config['log']) > 0:
-        path = os.path.expanduser(config['log'])
-        location = res.getheader('Location', uploadid)
-        with open(path, 'a') as fd:
-            fd.write(str(filename) + '->' + location + '\n')
-            print('Wrote upload log entry to ' + path)
-
-
-def listUploads(config, vault):
-    req = Request(config, 'GET', '/-/vaults/' + vault + '/multipart-uploads')
-    req.addContentLength()
-    req.sign()
-    req.send(config)
-
-def abortUpload(config, vault, uploadid):
-    req = Request(config, 'DELETE', '/-/vaults/' + vault + '/multipart-uploads/' + uploadid)
-    req.addContentLength()
-    req.sign()
-    req.send(config)
-
-def deleteFile(config, vault, archiveid):
-    req = Request(config, 'DELETE', '/-/vaults/' + vault + '/archives/' + archiveid)
-    req.addContentLength()
-    req.sign()
-    req.send(config)
-
-def createJob(config, vault, params):
-    req = Request(config, 'POST', '/-/vaults/' + vault + '/jobs')
-    req.setPayloadContents(json.dumps(params).encode('utf-8'))
-    req.addContentLength()
-    req.sign()
-    req.send(config)
-
-def listJobs(config, vault, joboutput=None):
-    req = Request(config, 'GET', '/-/vaults/' + vault + '/jobs')
-    req.addContentLength()
-    req.sign()
-    req.send(config, joboutput)
-
-def getJobOutput(config, vault, jobid, joboutput=None):
-    req = Request(config, 'GET', '/-/vaults/' + vault + '/jobs/' + jobid + '/output')
-    req.addContentLength()
-    req.sign()
-    req.send(config, joboutput)
-
-
+    @staticmethod
+    def createJob(config, vault, params):
+        req = Request(config, 'POST', '/-/vaults/' + vault + '/jobs')
+        req.setPayloadContents(json.dumps(params).encode('utf-8'))
+        req.addContentLength()
+        req.sign()
+        req.send(config)
+    
+    @staticmethod
+    def list(config, vault, joboutput=None):
+        req = Request(config, 'GET', '/-/vaults/' + vault + '/jobs')
+        req.addContentLength()
+        req.sign()
+        req.send(config, joboutput)
+    
+    def getJobOutput(config, vault, jobid, joboutput=None):
+        req = Request(config, 'GET', '/-/vaults/' + vault + '/jobs/' + jobid + '/output')
+        req.addContentLength()
+        req.sign()
+        req.send(config, joboutput)
+    
+    
 
 def usage():
     me = os.path.basename(sys.argv[0])
