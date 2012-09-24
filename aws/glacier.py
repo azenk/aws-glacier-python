@@ -85,11 +85,6 @@ class Profile:
         return self.port
 
 
-def hexhash(data):
-    h = hashlib.sha256()
-    h.update(data)
-    return h.hexdigest()
-
 def hashfile(filename, chunksize=2**20):
     with open(filename, 'rb') as infile:
         return hashstream(infile, chunksize)
@@ -129,19 +124,27 @@ def treehash(lines):
         lines = [hashpair(x,y) for x,y in pairs] + extra
     return lines[0]
     
-def getBasicDateTime():
-    return datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
-
-def getBasicDate():
-    return datetime.datetime.utcnow().strftime('%Y%m%d')
-
-def HMAC(key,msg):
-    hm = hmac.new(key, msg.encode('utf-8'), digestmod=hashlib.sha256)
-    return hm.digest()
-
-
-
 class Request():
+
+    @staticmethod
+    def HMAC(key,msg):
+        hm = hmac.new(key, msg.encode('utf-8'), digestmod=hashlib.sha256)
+        return hm.digest()
+
+    @staticmethod
+    def getBasicDateTime():
+        return datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+
+    @staticmethod
+    def getBasicDate():
+        return datetime.datetime.utcnow().strftime('%Y%m%d')
+
+    @staticmethod
+    def hexhash(data):
+        h = hashlib.sha256()
+        h.update(data)
+        return h.hexdigest()
+
     def __init__(self, profile, method, url):
         self.accessid = profile.getAccessID()
         self.accesskey = profile.getKey()
@@ -152,8 +155,8 @@ class Request():
         self.method = method
         self.url = url
         self.headers = {}
-        self.date = getBasicDate()
-        self.time = getBasicDateTime()
+        self.date = Request.getBasicDate()
+        self.time = Request.getBasicDateTime()
         self.headers['Host'] = 'glacier.' + self.region + '.amazonaws.com'
         self.headers['x-amz-glacier-version'] = '2012-06-01'
         self.headers['x-amz-date'] = self.time
@@ -187,7 +190,7 @@ class Request():
         s = self.getAuthType() + '\n'
         s += self.time + '\n'
         s += self.date + '/' + self.region + '/glacier/aws4_request' + '\n'
-        s += hexhash(self.getCanonicalString().encode('ascii'))
+        s += Request.hexhash(self.getCanonicalString().encode('ascii'))
         if self.debug:
             print('===\nString to sign:\n' + s + '===')
         return s
@@ -195,10 +198,10 @@ class Request():
     def getDerivedKey(self):
         if len(self.accesskey) == 0:
             raise ValueError('Access Key not specified. Use --key or edit your configuration file.')
-        kDate = HMAC(("AWS4" + self.accesskey).encode("utf-8"), self.date)
-        kRegion = HMAC(kDate, self.region)
-        kService = HMAC(kRegion, 'glacier')
-        kSigning = HMAC(kService, "aws4_request")
+        kDate = Request.HMAC(("AWS4" + self.accesskey).encode("utf-8"), self.date)
+        kRegion = Request.HMAC(kDate, self.region)
+        kService = Request.HMAC(kRegion, 'glacier')
+        kSigning = Request.HMAC(kService, "aws4_request")
         return kSigning
 
 
@@ -207,7 +210,7 @@ class Request():
         #do this first because it creates signedheaders
         strtosign = self.getStringToSign()
         derivedkey = self.getDerivedKey()
-        sig = HMAC(derivedkey, strtosign)
+        sig = Request.HMAC(derivedkey, strtosign)
         if len(self.accessid) == 0:
             raise ValueError('Access ID not specified. Use --id or edit your configuration file.')
 
@@ -259,7 +262,7 @@ class Request():
         s += self.signedheaders + '\n'     # erase last ;
 
 
-        s += hexhash(self.payload)
+        s += Request.hexhash(self.payload)
 
         if self.debug:
             print("===\nCanonical Request: \n" + s + '===')
@@ -293,6 +296,7 @@ class Request():
 
         con.close()
         return res, reply
+
 
 
     def __str__(self):
