@@ -20,9 +20,14 @@ def main():
     args = parser.parse_args()
 
     profile = aws.glacier.Profile(access_id=args.accesskey,key=args.secret,debug=args.debug)
+
+    # Get a list of our vaults
+    print("Vaults:")
     vaults = aws.glacier.Vault.getVaults(profile)
     for vault in vaults:
-        print(vault.properties['VaultARN'])
+        print(vault)
+
+    # Print test vault properties
     testvault = aws.glacier.Vault(profile,"testvault")
     print(testvault.getProperties())
 
