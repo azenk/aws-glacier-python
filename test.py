@@ -21,15 +21,30 @@ def main():
 
     profile = aws.glacier.Profile(access_id=args.accesskey,key=args.secret,debug=args.debug)
 
+    # Print test vault properties
+    testvault = aws.glacier.Vault(profile,"testvault")
+    print(testvault.getProperties())
+
+    # Create a test vault
+    print("Creating test vault \"TestVault2\"")
+    newvault = aws.glacier.Vault.create(profile,"TestVault2")
+
     # Get a list of our vaults
     print("Vaults:")
     vaults = aws.glacier.Vault.getVaults(profile)
     for vault in vaults:
         print(vault)
 
-    # Print test vault properties
-    testvault = aws.glacier.Vault(profile,"testvault")
-    print(testvault.getProperties())
+    # Delete Test Vault
+    print("Deleting test vault \"TestVault2\"")
+    newvault.delete()
+
+    # Get a list of our vaults
+    print("Vaults:")
+    vaults = aws.glacier.Vault.getVaults(profile)
+    for vault in vaults:
+        print(vault)
+
 
 
 if __name__ == "__main__":
