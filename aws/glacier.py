@@ -352,7 +352,7 @@ class Vault:
     	return self.properties
 
     def delete(self):
-        Vault.vaultoperation(self.profile, 'DELETE', name)
+        Vault.vaultoperation(self.profile, 'DELETE', self.vaultname)
 
     def __str__(self):
         return self.vaultname
