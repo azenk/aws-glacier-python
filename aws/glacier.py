@@ -124,6 +124,12 @@ def treehash(lines):
         lines = [hashpair(x,y) for x,y in pairs] + extra
     return lines[0]
     
+class RequestException(Exception):
+    def __init__(self, message):
+        Exception.__init__(self,message)
+
+
+        
 class Request():
 
     @staticmethod
@@ -295,6 +301,8 @@ class Request():
                     of.write(x)
 
         con.close()
+        if res.status != 200:
+	    raise RequestException(res.reason)
         return res, reply
 
 
